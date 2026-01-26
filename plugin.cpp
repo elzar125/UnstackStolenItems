@@ -52,7 +52,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse) {
     // Install the comparison function hook
     UnstackStolenItems::CompareExtraDataListsHook::Install();
 
-    SKSE::log::info("{} loaded ", 
+    SKSE::log::info("{} loaded", 
         plugin->GetName());
     
     return true;

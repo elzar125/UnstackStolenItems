@@ -3,6 +3,7 @@
     "name": "unstack-stolen-items",
     "version-string": "1.0.0",
     "dependencies": [
+        "simpleini",
         "spdlog",
         "directxtk",
         "rapidcsv"

@@ -1,8 +1,41 @@
 #include "UnstackStolenItems.h"
+#include <SimpleIni.h>
 #include <atomic>
 #include <vector>
+#include <filesystem>
 
 namespace UnstackStolenItems {
+
+    // ============================================================
+    // CONFIG
+    // ============================================================
+    
+    struct Config {
+        bool debugLogging = false;
+        
+        static Config& Get() {
+            static Config instance;
+            return instance;
+        }
+        
+        void Load() {
+            const auto dataPath = std::filesystem::current_path() / "Data";
+            const auto iniPath = dataPath / "SKSE" / "Plugins" / "UnstackStolenItems.ini";
+            
+            if (!std::filesystem::exists(iniPath)) {
+                return;
+            }
+            
+            CSimpleIniA ini;
+            ini.SetUnicode();
+            
+            if (ini.LoadFile(iniPath.string().c_str()) < 0) {
+                return;
+            }
+            
+            debugLogging = ini.GetBoolValue("General", "bDebugLogging", false);
+        }
+    };
 
     // ============================================================
     // GLOBALS
@@ -17,7 +50,7 @@ namespace UnstackStolenItems {
     static AddToItemList_t g_originalAddToItemList = nullptr;
 
     // ============================================================
-    // MENU HANDLER FOR DIAGNOSTICS
+    // MENU HANDLER 
     // ============================================================
     
     class MenuEventHandler : public RE::BSTEventSink<RE::MenuOpenCloseEvent> {
@@ -31,7 +64,8 @@ namespace UnstackStolenItems {
             const RE::MenuOpenCloseEvent* a_event,
             RE::BSTEventSource<RE::MenuOpenCloseEvent>*
         ) override {
-            if (a_event && a_event->opening && a_event->menuName == RE::InventoryMenu::MENU_NAME) {
+            if (Config::Get().debugLogging && a_event && a_event->opening && 
+                a_event->menuName == RE::InventoryMenu::MENU_NAME) {
                 SKSE::log::info("=== INVENTORY OPENED ===");
                 SKSE::log::info("  AddToItemList calls: {}", g_addToItemListCalls.load());
                 SKSE::log::info("  Split operations: {}", g_splitCalls.load());
@@ -83,11 +117,13 @@ namespace UnstackStolenItems {
         if (stolenCount > 0 && legitCount > 0) {
             g_splitCalls++;
             
-            SKSE::log::info("Splitting: {} (stolen={}, legit={})",
-                a_entry->object ? a_entry->object->GetName() : "null",
-                stolenCount, legitCount);
+            if (Config::Get().debugLogging) {
+                SKSE::log::info("Splitting: {} (stolen={}, legit={})",
+                    a_entry->object ? a_entry->object->GetName() : "null",
+                    stolenCount, legitCount);
+            }
             
-            // Create NEW entry for stolen items
+            // Create new entry for stolen items
             auto* stolenEntry = new RE::InventoryEntryData(a_entry->object, stolenCount);
             stolenEntry->extraLists = new RE::BSSimpleList<RE::ExtraDataList*>();
             for (auto* xList : stolenLists) {
@@ -175,6 +211,12 @@ namespace UnstackStolenItems {
     }
 
     void CompareExtraDataListsHook::Install() {
+        // Load config
+        Config::Get().Load();
+        if (Config::Get().debugLogging) {
+            SKSE::log::info("Debug logging enabled");
+        }
+        
         // ============================================================
         // AddToItemList: offset 0x8ef050 (AE 1.6.x)
         // Prologue: 40 56 57 41 56 (5 bytes)
@@ -183,7 +225,6 @@ namespace UnstackStolenItems {
         //   41 56 = PUSH R14
         // ============================================================
         {
-            // Get base address and add offset
             auto baseAddr = REL::Module::get().base();
             std::uintptr_t funcAddr = baseAddr + 0x8ef050;
             constexpr size_t PROLOGUE_SIZE = 5;
@@ -193,15 +234,16 @@ namespace UnstackStolenItems {
             );
         }
         
-        // Register menu handler for diagnostics
-        SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* msg) {
-            if (msg->type == SKSE::MessagingInterface::kDataLoaded) {
-                if (auto ui = RE::UI::GetSingleton()) {
-                    ui->AddEventSink(MenuEventHandler::GetSingleton());
-                    SKSE::log::info("Menu handler registered");
+        // Register menu handler for diagnostics (only if debug logging enabled)
+        if (Config::Get().debugLogging) {
+            SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* msg) {
+                if (msg->type == SKSE::MessagingInterface::kDataLoaded) {
+                    if (auto ui = RE::UI::GetSingleton()) {
+                        ui->AddEventSink(MenuEventHandler::GetSingleton());
+                    }
                 }
-            }
-        });
+            });
+        }
     }
 
 }
