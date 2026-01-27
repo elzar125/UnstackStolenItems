@@ -218,20 +218,45 @@ namespace UnstackStolenItems {
         }
         
         // ============================================================
-        // AddToItemList: offset 0x8ef050 (AE 1.6.x)
+        // AddToItemList hook
+        // AE (1.6.x)   offset: 0x8ef050
+        // SE (1.5.97)   offset: 0x856050
+        // VR (1.4.15)   offset: 0x880410
         // Prologue: 40 56 57 41 56 (5 bytes)
         //   40 56 = PUSH RSI
-        //   57    = PUSH RDI  
+        //   57    = PUSH RDI
         //   41 56 = PUSH R14
         // ============================================================
         {
             auto baseAddr = REL::Module::get().base();
-            std::uintptr_t funcAddr = baseAddr + 0x8ef050;
+            std::uintptr_t offset = 0;
+
+            if (REL::Module::IsAE()) {
+                offset = 0x8ef050;
+                SKSE::log::info("Detected AE runtime (version {})",
+                    REL::Module::get().version().string());
+            } else if (REL::Module::IsSE()) {
+                offset = 0x856050;
+                SKSE::log::info("Detected SE runtime (version {})",
+                    REL::Module::get().version().string());
+            } else if (REL::Module::IsVR()) {
+                offset = 0x880410;
+                SKSE::log::info("Detected VR runtime (version {})",
+                    REL::Module::get().version().string());
+            } else {
+                SKSE::log::error("Unsupported runtime version: {}",
+                    REL::Module::get().version().string());
+                return;
+            }
+
+            std::uintptr_t funcAddr = baseAddr + offset;
             constexpr size_t PROLOGUE_SIZE = 5;
-            
+
             g_originalAddToItemList = reinterpret_cast<AddToItemList_t>(
                 CreateManualHook(funcAddr, reinterpret_cast<void*>(&HookedAddToItemList), PROLOGUE_SIZE)
             );
+
+            SKSE::log::info("AddToItemList hooked at base+0x{:X}", offset);
         }
         
         // Register menu handler for diagnostics (only if debug logging enabled)
