@@ -132,9 +132,11 @@ namespace UnstackStolenItems {
             
             // Create new entry for legitimate items
             auto* legitEntry = new RE::InventoryEntryData(a_entry->object, legitCount);
-            legitEntry->extraLists = new RE::BSSimpleList<RE::ExtraDataList*>();
-            for (auto* xList : legitLists) {
-                legitEntry->extraLists->push_front(xList);
+            if (!legitLists.empty()) {
+                legitEntry->extraLists = new RE::BSSimpleList<RE::ExtraDataList*>();
+                for (auto* xList : legitLists) {
+                    legitEntry->extraLists->push_front(xList);
+                }
             }
             
             // Add stolen entry
