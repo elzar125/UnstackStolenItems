@@ -92,6 +92,10 @@ namespace UnstackStolenItems {
             return nullptr;
         }
         
+        if (!a_entry->object || !a_entry->extraLists) {
+            return g_originalAddToItemList(a_itemList, a_entry, a_param3);
+        }
+        
         // Count stolen items
         std::int32_t stolenCount = 0;
         std::vector<RE::ExtraDataList*> stolenLists;
