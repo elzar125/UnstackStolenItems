@@ -96,6 +96,12 @@ namespace UnstackStolenItems {
             return g_originalAddToItemList(a_itemList, a_entry, a_param3);
         }
         
+        // If the entire entry is owned by the player, nothing is stolen — skip
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player || a_entry->IsOwnedBy(player, true)) {
+            return g_originalAddToItemList(a_itemList, a_entry, a_param3);
+        }
+        
         // Count stolen items
         std::int32_t stolenCount = 0;
         std::vector<RE::ExtraDataList*> stolenLists;
@@ -238,9 +244,14 @@ namespace UnstackStolenItems {
             std::uintptr_t offset = 0;
 
             if (REL::Module::IsAE()) {
-                offset = 0x8ef050;
+                auto ver = REL::Module::get().version();
+                if (ver.compare(REL::Version(1, 6, 1000, 0)) >= 0) {
+                    offset = 0x8ef050;   // AE 1.6.1170
+                } else {
+                    offset = 0x895120;   // AE 1.6.640
+                }
                 SKSE::log::info("Detected AE runtime (version {})",
-                    REL::Module::get().version().string());
+                    ver.string());
             } else if (REL::Module::IsSE()) {
                 offset = 0x856050;
                 SKSE::log::info("Detected SE runtime (version {})",
