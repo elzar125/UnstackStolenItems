@@ -1,5 +1,6 @@
 #include "UnstackStolenItems.h"
 #include <SimpleIni.h>
+#include <MinHook.h>
 #include <atomic>
 #include <vector>
 #include <filesystem>
@@ -44,10 +45,15 @@ namespace UnstackStolenItems {
     static std::atomic<uint64_t> g_addToItemListCalls{0};
     static std::atomic<uint64_t> g_splitCalls{0};
     
-    // AddToItemList: offset 0x8ef050 (AE only)
-    // void* AddToItemList(void* itemList, RE::InventoryEntryData* entry, void* param3)
-    using AddToItemList_t = void*(*)(void*, RE::InventoryEntryData*, void*);
-    static AddToItemList_t g_originalAddToItemList = nullptr;
+    // AddToItemList — SE ID: 50978, AE ID: 51011
+    struct AddToItemListHook {
+        static void* thunk(void* a_itemList, RE::InventoryEntryData* a_entry, void* a_param3);
+
+        static inline std::uintptr_t func{0};
+        using func_t = void*(*)(void*, RE::InventoryEntryData*, void*);
+
+        static func_t original() { return reinterpret_cast<func_t>(func); }
+    };
 
     // ============================================================
     // MENU HANDLER 
@@ -77,69 +83,64 @@ namespace UnstackStolenItems {
     // ============================================================
     // HOOKED ADDTOITEMLIST
     // ============================================================
-    
-    static void* HookedAddToItemList(
+
+    void* AddToItemListHook::thunk(
         void* a_itemList,
         RE::InventoryEntryData* a_entry,
         void* a_param3
     ) {
         g_addToItemListCalls++;
-        
-        if (!a_entry || !a_itemList || !g_originalAddToItemList) {
-            if (g_originalAddToItemList) {
-                return g_originalAddToItemList(a_itemList, a_entry, a_param3);
-            }
-            return nullptr;
+
+        if (!a_entry || !a_itemList) {
+            return original()(a_itemList, a_entry, a_param3);
         }
-        
+
         if (!a_entry->object || !a_entry->extraLists) {
-            return g_originalAddToItemList(a_itemList, a_entry, a_param3);
+            return original()(a_itemList, a_entry, a_param3);
         }
-        
+
         // If the entire entry is owned by the player, nothing is stolen — skip
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player || a_entry->IsOwnedBy(player, true)) {
-            return g_originalAddToItemList(a_itemList, a_entry, a_param3);
+            return original()(a_itemList, a_entry, a_param3);
         }
-        
+
         // Count stolen items
         std::int32_t stolenCount = 0;
         std::vector<RE::ExtraDataList*> stolenLists;
         std::vector<RE::ExtraDataList*> legitLists;
-        
-        if (a_entry->extraLists) {
-            for (auto* xList : *a_entry->extraLists) {
-                if (xList) {
-                    if (xList->HasType(RE::ExtraDataType::kOwnership)) {
-                        auto* countExtra = xList->GetByType<RE::ExtraCount>();
-                        stolenCount += countExtra ? countExtra->count : 1;
-                        stolenLists.push_back(xList);
-                    } else {
-                        legitLists.push_back(xList);
-                    }
+
+        for (auto* xList : *a_entry->extraLists) {
+            if (xList) {
+                if (xList->HasType(RE::ExtraDataType::kOwnership)) {
+                    auto* countExtra = xList->GetByType<RE::ExtraCount>();
+                    stolenCount += countExtra ? countExtra->count : 1;
+                    stolenLists.push_back(xList);
+                } else {
+                    legitLists.push_back(xList);
                 }
             }
         }
-        
+
         std::int32_t legitCount = a_entry->countDelta - stolenCount;
-        
+
         // Check if mixed
         if (stolenCount > 0 && legitCount > 0) {
             g_splitCalls++;
-            
+
             if (Config::Get().debugLogging) {
                 SKSE::log::info("Splitting: {} (stolen={}, legit={})",
                     a_entry->object ? a_entry->object->GetName() : "null",
                     stolenCount, legitCount);
             }
-            
+
             // Create new entry for stolen items
             auto* stolenEntry = new RE::InventoryEntryData(a_entry->object, stolenCount);
             stolenEntry->extraLists = new RE::BSSimpleList<RE::ExtraDataList*>();
             for (auto* xList : stolenLists) {
                 stolenEntry->extraLists->push_front(xList);
             }
-            
+
             // Create new entry for legitimate items
             auto* legitEntry = new RE::InventoryEntryData(a_entry->object, legitCount);
             if (!legitLists.empty()) {
@@ -148,79 +149,21 @@ namespace UnstackStolenItems {
                     legitEntry->extraLists->push_front(xList);
                 }
             }
-            
+
             // Add stolen entry
-            g_originalAddToItemList(a_itemList, stolenEntry, a_param3);
-            
+            original()(a_itemList, stolenEntry, a_param3);
+
             // Add legitimate entry and return its result
-            return g_originalAddToItemList(a_itemList, legitEntry, a_param3);
+            return original()(a_itemList, legitEntry, a_param3);
         }
-        
+
         // Not mixed - pass through
-        return g_originalAddToItemList(a_itemList, a_entry, a_param3);
+        return original()(a_itemList, a_entry, a_param3);
     }
 
     // ============================================================
     // INSTALLATION
     // ============================================================
-
-    // Helper to create a manual hook
-    static void* CreateManualHook(
-        std::uintptr_t targetAddr,
-        void* hookFunc,
-        size_t prologueSize
-    ) {
-        auto& trampoline = SKSE::GetTrampoline();
-        auto* bytes = reinterpret_cast<std::uint8_t*>(targetAddr);
-        
-        // Allocate trampoline for relocated prologue + absolute jump back
-        auto* trampolineCode = trampoline.allocate(32);
-        
-        // Copy prologue bytes
-        std::memcpy(trampolineCode, bytes, prologueSize);
-        
-        // Add absolute JMP back to original + prologueSize
-        std::uintptr_t returnAddr = targetAddr + prologueSize;
-        std::uint8_t* jumpBack = reinterpret_cast<std::uint8_t*>(trampolineCode) + prologueSize;
-        jumpBack[0] = 0xFF;  // JMP [rip+0]
-        jumpBack[1] = 0x25;
-        jumpBack[2] = 0x00;
-        jumpBack[3] = 0x00;
-        jumpBack[4] = 0x00;
-        jumpBack[5] = 0x00;
-        std::memcpy(jumpBack + 6, &returnAddr, 8);
-        
-        // Create absolute JMP stub to our hook
-        auto* jumpStub = trampoline.allocate(14);
-        auto hookAddr = reinterpret_cast<std::uintptr_t>(hookFunc);
-        
-        std::uint8_t* stubBytes = reinterpret_cast<std::uint8_t*>(jumpStub);
-        stubBytes[0] = 0xFF;
-        stubBytes[1] = 0x25;
-        stubBytes[2] = 0x00;
-        stubBytes[3] = 0x00;
-        stubBytes[4] = 0x00;
-        stubBytes[5] = 0x00;
-        std::memcpy(stubBytes + 6, &hookAddr, 8);
-        
-        // Write relative JMP + NOPs at original location
-        auto stubAddr = reinterpret_cast<std::uintptr_t>(jumpStub);
-        std::int32_t relOffset = static_cast<std::int32_t>(stubAddr - targetAddr - 5);
-        
-        std::vector<std::uint8_t> patchBytes(prologueSize);
-        patchBytes[0] = 0xE9;
-        patchBytes[1] = static_cast<std::uint8_t>(relOffset);
-        patchBytes[2] = static_cast<std::uint8_t>(relOffset >> 8);
-        patchBytes[3] = static_cast<std::uint8_t>(relOffset >> 16);
-        patchBytes[4] = static_cast<std::uint8_t>(relOffset >> 24);
-        for (size_t i = 5; i < prologueSize; ++i) {
-            patchBytes[i] = 0x90;  // NOP
-        }
-        
-        REL::safe_write(targetAddr, patchBytes.data(), patchBytes.size());
-        
-        return trampolineCode;
-    }
 
     void CompareExtraDataListsHook::Install() {
         // Load config
@@ -228,54 +171,45 @@ namespace UnstackStolenItems {
         if (Config::Get().debugLogging) {
             SKSE::log::info("Debug logging enabled");
         }
-        
-        // ============================================================
-        // AddToItemList hook
-        // AE (1.6.x)   offset: 0x8ef050
-        // SE (1.5.97)   offset: 0x856050
-        // VR (1.4.15)   offset: 0x880410
-        // Prologue: 40 56 57 41 56 (5 bytes)
-        //   40 56 = PUSH RSI
-        //   57    = PUSH RDI
-        //   41 56 = PUSH R14
-        // ============================================================
-        {
-            auto baseAddr = REL::Module::get().base();
-            std::uintptr_t offset = 0;
 
-            if (REL::Module::IsAE()) {
-                auto ver = REL::Module::get().version();
-                if (ver.compare(REL::Version(1, 6, 1000, 0)) >= 0) {
-                    offset = 0x8ef050;   // AE 1.6.1170
-                } else {
-                    offset = 0x895120;   // AE 1.6.640
-                }
-                SKSE::log::info("Detected AE runtime (version {})",
-                    ver.string());
-            } else if (REL::Module::IsSE()) {
-                offset = 0x856050;
-                SKSE::log::info("Detected SE runtime (version {})",
-                    REL::Module::get().version().string());
-            } else if (REL::Module::IsVR()) {
-                offset = 0x880410;
-                SKSE::log::info("Detected VR runtime (version {})",
-                    REL::Module::get().version().string());
+        // Initialize MinHook
+        if (MH_Initialize() != MH_OK) {
+            SKSE::log::error("Failed to initialize MinHook");
+            return;
+        }
+
+        // AddToItemList hook — SE ID: 50978, AE ID: 51011, VR offset: 0x880410
+        {
+            std::uintptr_t funcAddr;
+            if (REL::Module::IsVR()) {
+                funcAddr = REL::Module::get().base() + 0x880410;
             } else {
-                SKSE::log::error("Unsupported runtime version: {}",
-                    REL::Module::get().version().string());
+                funcAddr = REL::RelocationID(50978, 51011).address();
+            }
+            void* originalFunc = nullptr;
+
+            auto status = MH_CreateHook(
+                reinterpret_cast<void*>(funcAddr),
+                reinterpret_cast<void*>(&AddToItemListHook::thunk),
+                &originalFunc
+            );
+
+            if (status != MH_OK) {
+                SKSE::log::error("Failed to create AddToItemList hook: {}", MH_StatusToString(status));
                 return;
             }
 
-            std::uintptr_t funcAddr = baseAddr + offset;
-            constexpr size_t PROLOGUE_SIZE = 5;
+            AddToItemListHook::func = reinterpret_cast<std::uintptr_t>(originalFunc);
 
-            g_originalAddToItemList = reinterpret_cast<AddToItemList_t>(
-                CreateManualHook(funcAddr, reinterpret_cast<void*>(&HookedAddToItemList), PROLOGUE_SIZE)
-            );
+            status = MH_EnableHook(reinterpret_cast<void*>(funcAddr));
+            if (status != MH_OK) {
+                SKSE::log::error("Failed to enable AddToItemList hook: {}", MH_StatusToString(status));
+                return;
+            }
 
-            SKSE::log::info("AddToItemList hooked at base+0x{:X}", offset);
+            SKSE::log::info("AddToItemList hooked via MinHook at {:X}", funcAddr);
         }
-        
+
         // Register menu handler for diagnostics (only if debug logging enabled)
         if (Config::Get().debugLogging) {
             SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* msg) {

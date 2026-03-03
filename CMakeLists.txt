@@ -45,7 +45,8 @@ add_library(${PROJECT_NAME} SHARED
     plugin.cpp
     ${SOURCES}
 ) 
-target_link_libraries(${PROJECT_NAME} PRIVATE CommonLibSSE)
+add_subdirectory(extern/minhook)
+target_link_libraries(${PROJECT_NAME} PRIVATE CommonLibSSE minhook)
 
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23) # <--- use C++23 standard
 target_precompile_headers(${PROJECT_NAME} PRIVATE PCH.h) # <--- PCH.h is required!
