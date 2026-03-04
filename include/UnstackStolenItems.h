@@ -6,9 +6,7 @@
 
 namespace UnstackStolenItems {
 
-    // Hook for InventoryChanges::AddItem
-    
-    struct CompareExtraDataListsHook {
+    struct Hooks {
         static void Install();
     };
 

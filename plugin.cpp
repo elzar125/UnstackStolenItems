@@ -45,12 +45,9 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse) {
 
     SKSE::Init(skse);
 
-    // Allocate trampoline space for hooks
-    // 2 hooks * (32 bytes trampoline + 14 bytes jump stub) = ~92 bytes
-    SKSE::AllocTrampoline(256);
+    SKSE::AllocTrampoline(64);
 
-    // Install the comparison function hook
-    UnstackStolenItems::CompareExtraDataListsHook::Install();
+    UnstackStolenItems::Hooks::Install();
 
     SKSE::log::info("{} loaded", 
         plugin->GetName());

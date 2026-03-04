@@ -4,6 +4,7 @@ out/
 
 # Extern
 extern/
+RE
 
 # Visual Studio
 .vs/
@@ -23,9 +24,6 @@ _deps/
 # vcpkg
 vcpkg_installed/
 .vcpkg-root
-
-extern/
-CLAUDE.md
 
 # IDE files
 .vscode/
