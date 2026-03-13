@@ -5,10 +5,6 @@
 
 namespace UnstackStolenItems {
 
-    // ============================================================
-    // CONFIG
-    // ============================================================
-
     struct Config {
         bool debugLogging = false;
 
@@ -36,10 +32,6 @@ namespace UnstackStolenItems {
         }
     };
 
-    // ============================================================
-    // HOOK TYPEDEFS AND GLOBALS
-    // ============================================================
-
     using HasOnlyIgnorableExtraData_t = bool(*)(RE::ExtraDataList*, char);
     using IsNotEqual_t = bool(*)(RE::ExtraDataList*, RE::ExtraDataList*, char);
     using AddExtraList_t = void(*)(RE::InventoryEntryData*, RE::ExtraDataList*, char);
@@ -47,10 +39,6 @@ namespace UnstackStolenItems {
     HasOnlyIgnorableExtraData_t g_origHasOnlyIgnorable = nullptr;
     IsNotEqual_t g_origIsNotEqual = nullptr;
     AddExtraList_t g_origAddExtraList = nullptr;
-
-    // ============================================================
-    // HELPERS
-    // ============================================================
 
     bool IsStolenExtraDataList(RE::ExtraDataList* xList) {
         if (!xList || !xList->HasType(RE::ExtraDataType::kOwnership))
@@ -67,15 +55,6 @@ namespace UnstackStolenItems {
         return (owner != player && owner != player->GetActorBase());
     }
 
-    // ============================================================
-    // HOOK 1: HasOnlyIgnorableExtraData  (SE 11452, AE 11598)
-    //
-    // When the display builder asks "is this ExtraDataList
-    // ignorable?" with ownership check enabled, we override
-    // the answer for stolen items: return false so they get
-    // their own display row.
-    // ============================================================
-
     bool HasOnlyIgnorableExtraData_Hook(RE::ExtraDataList* a_list, char a_checkOwnership) {
         bool result = g_origHasOnlyIgnorable(a_list, a_checkOwnership);
         if (result && a_checkOwnership && IsStolenExtraDataList(a_list)) {
@@ -84,30 +63,12 @@ namespace UnstackStolenItems {
         return result;
     }
 
-    // ============================================================
-    // HOOK 2: ExtraDataList::IsNotEqual  (SE 11448, AE 11594)
-    //
-    // When comparing two ExtraDataLists and both are stolen,
-    // force "equal" so AddExtraList merges their counts.
-    // This prevents x1 stacks.
-    // ============================================================
-
     bool IsNotEqual_Hook(RE::ExtraDataList* a_lhs, RE::ExtraDataList* a_rhs, char a_param3) {
         if (IsStolenExtraDataList(a_lhs) && IsStolenExtraDataList(a_rhs)) {
             return false;
         }
         return g_origIsNotEqual(a_lhs, a_rhs, a_param3);
     }
-
-    // ============================================================
-    // HOOK 3: InventoryEntryData::AddExtraList  (SE 15748, AE 15986)
-    //
-    // The game calls AddExtraList with merge=false for stolen
-    // items, so the IsNotEqual merge path is never reached.
-    // We force merge=true when adding a stolen ExtraDataList,
-    // which triggers the IsNotEqual comparison and allows
-    // stolen items to consolidate into one ExtraDataList.
-    // ============================================================
 
     void AddExtraList_Hook(RE::InventoryEntryData* a_this, RE::ExtraDataList* a_extra, char a_merge) {
         if (!a_merge && a_extra && IsStolenExtraDataList(a_extra)) {
@@ -118,10 +79,6 @@ namespace UnstackStolenItems {
         }
         g_origAddExtraList(a_this, a_extra, a_merge);
     }
-
-    // ============================================================
-    // HOOK INSTALLATION
-    // ============================================================
 
     void Hooks::Install() {
         Config::Get().Load();
