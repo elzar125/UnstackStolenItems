@@ -5,12 +5,10 @@
 
 namespace UnstackStolenItems {
 
-    // ============================================================
-    // CONFIG
-    // ============================================================
-
     struct Config {
         bool debugLogging = false;
+        bool unstackStolen = true;
+        bool unstackStolenIncludeIngredients = false;
 
         static Config& Get() {
             static Config instance;
@@ -21,24 +19,20 @@ namespace UnstackStolenItems {
             const auto dataPath = std::filesystem::current_path() / "Data";
             const auto iniPath = dataPath / "SKSE" / "Plugins" / "UnstackStolenItems.ini";
 
-            if (!std::filesystem::exists(iniPath)) {
+            if (!std::filesystem::exists(iniPath))
                 return;
-            }
 
             CSimpleIniA ini;
             ini.SetUnicode();
 
-            if (ini.LoadFile(iniPath.string().c_str()) < 0) {
+            if (ini.LoadFile(iniPath.string().c_str()) < 0)
                 return;
-            }
 
             debugLogging = ini.GetBoolValue("General", "bDebugLogging", false);
+            unstackStolen = ini.GetBoolValue("Unstacking", "bUnstackStolen", true);
+            unstackStolenIncludeIngredients = ini.GetBoolValue("Unstacking", "bUnstackStolenIncludeIngredients", false);
         }
     };
-
-    // ============================================================
-    // HOOK TYPEDEFS AND GLOBALS
-    // ============================================================
 
     using HasOnlyIgnorableExtraData_t = bool(*)(RE::ExtraDataList*, char);
     using IsNotEqual_t = bool(*)(RE::ExtraDataList*, RE::ExtraDataList*, char);
@@ -48,9 +42,7 @@ namespace UnstackStolenItems {
     IsNotEqual_t g_origIsNotEqual = nullptr;
     AddExtraList_t g_origAddExtraList = nullptr;
 
-    // ============================================================
-    // HELPERS
-    // ============================================================
+    thread_local RE::TESBoundObject* g_addExtraListObject = nullptr;
 
     bool IsStolenExtraDataList(RE::ExtraDataList* xList) {
         if (!xList || !xList->HasType(RE::ExtraDataType::kOwnership))
@@ -67,66 +59,95 @@ namespace UnstackStolenItems {
         return (owner != player && owner != player->GetActorBase());
     }
 
-    // ============================================================
-    // HOOK 1: HasOnlyIgnorableExtraData  (SE 11452, AE 11598)
-    //
-    // When the display builder asks "is this ExtraDataList
-    // ignorable?" with ownership check enabled, we override
-    // the answer for stolen items: return false so they get
-    // their own display row.
-    // ============================================================
+    RE::TESBoundObject* FindOwnerObject(RE::ExtraDataList* a_target) {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) return nullptr;
+        auto* changes = player->GetInventoryChanges();
+        if (!changes || !changes->entryList) return nullptr;
+        for (auto& entry : *changes->entryList) {
+            if (!entry || !entry->extraLists) continue;
+            for (auto& xList : *entry->extraLists) {
+                if (xList == a_target) return entry->object;
+            }
+        }
+        return nullptr;
+    }
+
+    bool ShouldSkipStolenUnstack(RE::TESBoundObject* a_obj) {
+        if (!a_obj) return false;
+        auto& cfg = Config::Get();
+        if (!cfg.unstackStolenIncludeIngredients && a_obj->GetFormType() == RE::FormType::Ingredient)
+            return true;
+        return false;
+    }
 
     bool HasOnlyIgnorableExtraData_Hook(RE::ExtraDataList* a_list, char a_checkOwnership) {
         bool result = g_origHasOnlyIgnorable(a_list, a_checkOwnership);
-        if (result && a_checkOwnership && IsStolenExtraDataList(a_list)) {
+        if (!result)
+            return false;
+
+        auto& cfg = Config::Get();
+
+        if (cfg.unstackStolen && a_checkOwnership && IsStolenExtraDataList(a_list)) {
+            if (ShouldSkipStolenUnstack(FindOwnerObject(a_list)))
+                return true;
             return false;
         }
-        return result;
+
+        return true;
     }
 
-    // ============================================================
-    // HOOK 2: ExtraDataList::IsNotEqual  (SE 11448, AE 11594)
-    //
-    // When comparing two ExtraDataLists and both are stolen,
-    // force "equal" so AddExtraList merges their counts.
-    // This prevents x1 stacks.
-    // ============================================================
-
     bool IsNotEqual_Hook(RE::ExtraDataList* a_lhs, RE::ExtraDataList* a_rhs, char a_param3) {
-        if (IsStolenExtraDataList(a_lhs) && IsStolenExtraDataList(a_rhs)) {
+        auto& cfg = Config::Get();
+
+        bool lhsDistinct = a_lhs && (a_lhs->HasType(RE::ExtraDataType::kTextDisplayData) ||
+                                      a_lhs->HasType(RE::ExtraDataType::kEnchantment));
+        bool rhsDistinct = a_rhs && (a_rhs->HasType(RE::ExtraDataType::kTextDisplayData) ||
+                                      a_rhs->HasType(RE::ExtraDataType::kEnchantment));
+        if (lhsDistinct || rhsDistinct)
+            return g_origIsNotEqual(a_lhs, a_rhs, a_param3);
+
+        bool skipStolen = ShouldSkipStolenUnstack(g_addExtraListObject);
+
+        if (cfg.unstackStolen && !skipStolen && (IsStolenExtraDataList(a_lhs) != IsStolenExtraDataList(a_rhs)))
+            return true;
+
+        bool anyMatch = cfg.unstackStolen && !skipStolen && IsStolenExtraDataList(a_lhs);
+
+        if (anyMatch)
             return false;
-        }
+
         return g_origIsNotEqual(a_lhs, a_rhs, a_param3);
     }
 
-    // ============================================================
-    // HOOK 3: InventoryEntryData::AddExtraList  (SE 15748, AE 15986)
-    //
-    // The game calls AddExtraList with merge=false for stolen
-    // items, so the IsNotEqual merge path is never reached.
-    // We force merge=true when adding a stolen ExtraDataList,
-    // which triggers the IsNotEqual comparison and allows
-    // stolen items to consolidate into one ExtraDataList.
-    // ============================================================
-
     void AddExtraList_Hook(RE::InventoryEntryData* a_this, RE::ExtraDataList* a_extra, char a_merge) {
-        if (!a_merge && a_extra && IsStolenExtraDataList(a_extra)) {
-            if (Config::Get().debugLogging) {
-                SKSE::log::info("AddExtraList: forcing merge=true for stolen ExtraDataList");
-            }
-            a_merge = 1;
+        g_addExtraListObject = a_this ? a_this->object : nullptr;
+        if (!a_merge && a_extra) {
+            auto& cfg = Config::Get();
+            bool skipStolen = ShouldSkipStolenUnstack(g_addExtraListObject);
+
+            bool force = cfg.unstackStolen && !skipStolen && IsStolenExtraDataList(a_extra);
+
+            if (force)
+                a_merge = 1;
         }
         g_origAddExtraList(a_this, a_extra, a_merge);
+        g_addExtraListObject = nullptr;
     }
-
-    // ============================================================
-    // HOOK INSTALLATION
-    // ============================================================
 
     void Hooks::Install() {
         Config::Get().Load();
-        if (Config::Get().debugLogging) {
+
+        auto& cfg = Config::Get();
+        if (cfg.debugLogging)
             SKSE::log::info("Debug logging enabled");
+
+        SKSE::log::info("Unstacking config: stolen={} (includeIngredients={})",
+            cfg.unstackStolen, cfg.unstackStolenIncludeIngredients);
+
+        if (!cfg.unstackStolen) {
+            SKSE::log::info("Unstacking disabled, skipping hooks");
+            return;
         }
 
         if (MH_Initialize() != MH_OK) {
@@ -134,46 +155,118 @@ namespace UnstackStolenItems {
             return;
         }
 
-        // Hook 1: HasOnlyIgnorableExtraData
-        auto hasOnlyIgnorableAddr = REL::RelocationID(11452, 11598).address();
-        auto status = MH_CreateHook(
-            reinterpret_cast<void*>(hasOnlyIgnorableAddr),
-            reinterpret_cast<void*>(&HasOnlyIgnorableExtraData_Hook),
-            reinterpret_cast<void**>(&g_origHasOnlyIgnorable)
-        );
-        if (status != MH_OK) {
-            SKSE::log::error("Failed to hook HasOnlyIgnorableExtraData: {}", MH_StatusToString(status));
+        auto resolveAddr = [](std::uint64_t a_seID, std::uint64_t a_aeID, std::uint64_t a_vrOffset) -> std::uintptr_t {
+            if (REL::Module::IsVR())
+                return REL::Offset(a_vrOffset).address();
+            return REL::RelocationID(a_seID, a_aeID).address();
+        };
+
+        auto installHook = [](std::uintptr_t a_target, void* a_detour, void** a_original, const char* a_name) -> bool {
+            auto status = MH_CreateHook(reinterpret_cast<void*>(a_target), a_detour, a_original);
+            if (status != MH_OK) {
+                SKSE::log::error("Failed to hook {}: {}", a_name, MH_StatusToString(status));
+                return false;
+            }
+            MH_EnableHook(reinterpret_cast<void*>(a_target));
+            return true;
+        };
+
+        if (!installHook(resolveAddr(11452, 11598, 0x11D220),
+                reinterpret_cast<void*>(&HasOnlyIgnorableExtraData_Hook),
+                reinterpret_cast<void**>(&g_origHasOnlyIgnorable),
+                "HasOnlyIgnorableExtraData"))
+            return;
+
+        if (!installHook(resolveAddr(11448, 11594, 0x119B10),
+                reinterpret_cast<void*>(&IsNotEqual_Hook),
+                reinterpret_cast<void**>(&g_origIsNotEqual),
+                "IsNotEqual"))
+            return;
+
+        if (!installHook(resolveAddr(15748, 15986, 0x1E6AB0),
+                reinterpret_cast<void*>(&AddExtraList_Hook),
+                reinterpret_cast<void**>(&g_origAddExtraList),
+                "AddExtraList"))
+            return;
+
+        SKSE::log::info("Hooks installed");
+    }
+
+    void Hooks::MergeInventoryLists() {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) return;
+
+        auto* changes = player->GetInventoryChanges();
+        if (!changes || !changes->entryList) return;
+
+        if (!g_origIsNotEqual) {
+            SKSE::log::warn("MergeInventoryLists: original IsNotEqual not available, skipping");
             return;
         }
-        MH_EnableHook(reinterpret_cast<void*>(hasOnlyIgnorableAddr));
 
-        // Hook 2: IsNotEqual
-        auto isNotEqualAddr = REL::RelocationID(11448, 11594).address();
-        status = MH_CreateHook(
-            reinterpret_cast<void*>(isNotEqualAddr),
-            reinterpret_cast<void*>(&IsNotEqual_Hook),
-            reinterpret_cast<void**>(&g_origIsNotEqual)
-        );
-        if (status != MH_OK) {
-            SKSE::log::error("Failed to hook IsNotEqual: {}", MH_StatusToString(status));
-            return;
+        auto& cfg = Config::Get();
+        int totalMerged = 0;
+
+        for (auto& entry : *changes->entryList) {
+            if (!entry || !entry->extraLists) continue;
+
+            std::vector<RE::ExtraDataList*> lists;
+            for (auto& xList : *entry->extraLists) {
+                if (xList) lists.push_back(xList);
+            }
+
+            if (lists.size() < 2) continue;
+
+            std::vector<bool> removed(lists.size(), false);
+            int mergedThisEntry = 0;
+
+            for (std::size_t i = 0; i < lists.size(); i++) {
+                if (removed[i]) continue;
+                for (std::size_t j = i + 1; j < lists.size(); j++) {
+                    if (removed[j]) continue;
+                    if (lists[i]->HasType(RE::ExtraDataType::kTextDisplayData) ||
+                        lists[j]->HasType(RE::ExtraDataType::kTextDisplayData) ||
+                        lists[i]->HasType(RE::ExtraDataType::kEnchantment) ||
+                        lists[j]->HasType(RE::ExtraDataType::kEnchantment))
+                        continue;
+                    bool eitherHotkeyed = lists[i]->HasType(RE::ExtraDataType::kHotkey) !=
+                                          lists[j]->HasType(RE::ExtraDataType::kHotkey);
+                    if (eitherHotkeyed) continue;
+                    if (!g_origIsNotEqual(lists[i], lists[j], 1) &&
+                        !g_origIsNotEqual(lists[j], lists[i], 1)) {
+                        auto countI = lists[i]->GetCount();
+                        auto countJ = lists[j]->GetCount();
+                        lists[i]->SetCount(static_cast<std::uint16_t>(countI + countJ));
+                        removed[j] = true;
+                        mergedThisEntry++;
+                    }
+                }
+            }
+
+            if (mergedThisEntry == 0) continue;
+
+            std::vector<RE::ExtraDataList*> surviving;
+            for (std::size_t i = 0; i < lists.size(); i++) {
+                if (!removed[i]) surviving.push_back(lists[i]);
+            }
+
+            entry->extraLists->clear();
+            for (auto it = surviving.rbegin(); it != surviving.rend(); ++it) {
+                entry->extraLists->push_front(*it);
+            }
+
+            totalMerged += mergedThisEntry;
+
+            if (cfg.debugLogging) {
+                const char* name = entry->object ? entry->object->GetName() : "???";
+                SKSE::log::info("Merged {} ExtraDataLists for {} ({} remaining)",
+                    mergedThisEntry, name, surviving.size());
+            }
         }
-        MH_EnableHook(reinterpret_cast<void*>(isNotEqualAddr));
 
-        // Hook 3: AddExtraList
-        auto addExtraListAddr = REL::RelocationID(15748, 15986).address();
-        status = MH_CreateHook(
-            reinterpret_cast<void*>(addExtraListAddr),
-            reinterpret_cast<void*>(&AddExtraList_Hook),
-            reinterpret_cast<void**>(&g_origAddExtraList)
-        );
-        if (status != MH_OK) {
-            SKSE::log::error("Failed to hook AddExtraList: {}", MH_StatusToString(status));
-            return;
+        if (totalMerged > 0) {
+            SKSE::log::info("Post-load merge: consolidated {} ExtraDataLists", totalMerged);
         }
-        MH_EnableHook(reinterpret_cast<void*>(addExtraListAddr));
-
-        SKSE::log::info("UnstackStolenItems hooks installed (HasOnlyIgnorableExtraData + IsNotEqual + AddExtraList)");
     }
 
 }

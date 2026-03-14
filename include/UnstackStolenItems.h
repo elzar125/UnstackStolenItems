@@ -8,6 +8,7 @@ namespace UnstackStolenItems {
 
     struct Hooks {
         static void Install();
+        static void MergeInventoryLists();
     };
 
 }

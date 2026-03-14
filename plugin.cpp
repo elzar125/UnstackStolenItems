@@ -6,9 +6,6 @@
 
 using namespace std::literals;
 
-// ============================================
-// Plugin Declaration
-// ============================================
 SKSEPluginInfo(
     .Version = { 1, 0, 0, 0 },
     .Name = "UnstackStolenItems"sv,
@@ -18,9 +15,6 @@ SKSEPluginInfo(
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary
 )
 
-// ============================================
-// Setup Logging
-// ============================================
 void SetupLog() {
     auto logsFolder = SKSE::log::log_directory();
     if (!logsFolder) SKSE::stl::report_and_fail("SKSE log_directory not provided, logs disabled.");
@@ -33,9 +27,12 @@ void SetupLog() {
     spdlog::flush_on(spdlog::level::info);
 }
 
-// ============================================
-// Plugin Entry Point
-// ============================================
+void OnMessage(SKSE::MessagingInterface::Message* a_msg) {
+    if (a_msg->type == SKSE::MessagingInterface::kPostLoadGame) {
+        UnstackStolenItems::Hooks::MergeInventoryLists();
+    }
+}
+
 SKSEPluginLoad(const SKSE::LoadInterface* skse) {
     SetupLog();
 
@@ -44,13 +41,15 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse) {
     SKSE::log::info("Game version: {}", skse->RuntimeVersion().string());
 
     SKSE::Init(skse);
-
     SKSE::AllocTrampoline(64);
 
     UnstackStolenItems::Hooks::Install();
 
-    SKSE::log::info("{} loaded", 
-        plugin->GetName());
-    
+    auto* messaging = SKSE::GetMessagingInterface();
+    if (messaging) {
+        messaging->RegisterListener(OnMessage);
+    }
+
+    SKSE::log::info("{} loaded", plugin->GetName());
     return true;
 }
